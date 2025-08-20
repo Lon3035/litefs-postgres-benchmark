@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -14,6 +12,7 @@ import (
 	"time"
 
 	"github.com/brianvoe/gofakeit/v6"
+	"github.com/lon3035/litefs-postgres-benchmark/db"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -21,43 +20,64 @@ import (
 var (
 	dsn  = flag.String("dsn", "", "datasource name")
 	addr = flag.String("addr", ":8080", "bind address")
+	conn = flag.String("db", "sqlite", "database connector")
 )
 
-var db *sql.DB
+var database db.Database
 
-//go:embed schema.sql
-var schemaSQL string
+//go:embed schema.sqlite.sql
+var schemaSQLSqlite string
+
+//go:embed schema.postgres.sql
+var schemaSQLPostgres string
 
 func main() {
 	log.SetFlags(0)
 	rand.Seed(time.Now().UnixNano())
 
-	if err := run(context.Background()); err != nil {
+	flag.Parse()
+
+	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context) (err error) {
-	flag.Parse()
+func run() (err error) {
 
 	if *dsn == "" {
 		return fmt.Errorf("dsn required")
 	} else if *addr == "" {
 		return fmt.Errorf("bind address required")
+	} else if *conn == "" {
+		return fmt.Errorf("database connector required")
 	}
 
-	// Connect to SQLite database.
-	db, err = sql.Open("sqlite3", *dsn)
-	if err != nil {
-		return fmt.Errorf("open db: %w", err)
+	switch *conn {
+	case "sqlite":
+		database = &db.SqliteDB{}
+	case "postgres":
+		database = &db.PostgresDB{}
+	default:
+		log.Fatal("Unknown database type")
 	}
-	defer db.Close()
+
+	if err := database.Connect(*dsn); err != nil {
+		log.Fatal(err)
+	}
+	defer database.Close()
 
 	log.Printf("database opened at %s", *dsn)
 
 	// Run migration.
-	if _, err := db.Exec(schemaSQL); err != nil {
+	var migration string
+	switch *conn {
+	case "sqlite":
+		migration = schemaSQLSqlite
+	case "postgres":
+		migration = schemaSQLPostgres
+	}
+	if _, err := database.Exec(migration); err != nil {
 		return fmt.Errorf("cannot migrate schema: %w", err)
 	}
 
@@ -82,7 +102,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Query for the most recently added people.
-	rows, err := db.Query(`
+	rows, err := database.Query(`
 		SELECT id, name, phone, company
 		FROM persons
 		ORDER BY id DESC
@@ -158,7 +178,7 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 		Phone:   gofakeit.Phone(),
 		Company: gofakeit.Company(),
 	}
-	if _, err := db.ExecContext(r.Context(), `INSERT INTO persons (name, phone, company) VALUES (?, ?, ?)`, person.Name, person.Phone, person.Company); err != nil {
+	if _, err := database.ExecContext(r.Context(), `INSERT INTO persons (name, phone, company) VALUES ($1, $2, $3)`, person.Name, person.Phone, person.Company); err != nil {
 		http.Error(w, "Method not alllowed", http.StatusMethodNotAllowed)
 		return
 	}
